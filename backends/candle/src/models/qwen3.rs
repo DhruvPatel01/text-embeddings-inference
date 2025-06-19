@@ -5,6 +5,7 @@ use crate::models::Model;
 use candle::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::{Embedding, Module, VarBuilder};
 use serde::Deserialize;
+use std::collections::HashMap;
 use text_embeddings_backend_core::{Batch, ModelType, Pool};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -24,6 +25,7 @@ pub struct Qwen3Config {
     pub sliding_window: Option<usize>,
     pub use_sliding_window: bool,
     pub eos_token_id: usize,
+    pub id2label: Option<HashMap<String, String>>,
 }
 
 struct Qwen3Attention {
@@ -375,6 +377,42 @@ impl Qwen3Layer {
     }
 }
 
+pub trait ClassificationHead {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor>;
+}
+
+pub struct Qwen3ClassificationHead {
+    output: Linear,
+    span: tracing::Span,
+}
+
+impl Qwen3ClassificationHead {
+    pub fn load(vb: VarBuilder, config: &Qwen3Config) -> Result<Self> {
+        let n_classes = match &config.id2label {
+            None => candle::bail!("`id2label` must be set for classifier models"),
+            Some(id2label) => id2label.len(),
+        };
+
+        let output_weight = vb
+            .pp("score")
+            .get((n_classes, config.hidden_size), "weight")?;
+        let output_bias = vb.pp("score").get(n_classes, "bias")?;
+        let output = Linear::new(output_weight, Some(output_bias), None);
+
+        Ok(Self {
+            output,
+            span: tracing::span!(tracing::Level::TRACE, "classifier"),
+        })
+    }
+}
+
+impl ClassificationHead for Qwen3ClassificationHead {
+    fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
+        let _enter = self.span.enter();
+        self.output.forward(hidden_states)
+    }
+}
+
 pub struct Qwen3Model {
     embeddings: Embedding,
     layers: Vec<Qwen3Layer>,
@@ -382,6 +420,7 @@ pub struct Qwen3Model {
     rotary_cache: (Tensor, Tensor),
     rotary_dim: usize,
     pool: Pool,
+    classifier: Option<Box<dyn ClassificationHead + Send>>,
     pub device: Device,
     num_attention_heads: usize,
     pad_token_id: u32,
@@ -391,11 +430,14 @@ pub struct Qwen3Model {
 
 impl Qwen3Model {
     pub fn load(vb: VarBuilder, config: &Qwen3Config, model_type: ModelType) -> Result<Self> {
-        let pool = match model_type {
+        let (pool, classifier) = match model_type {
             ModelType::Classifier => {
-                candle::bail!("`classifier` model type is not supported for Qwen3")
+                let pool = Pool::LastToken;
+                let classifier: Box<dyn ClassificationHead + Send> = 
+                    Box::new(Qwen3ClassificationHead::load(vb.clone(), config)?);
+                (pool, Some(classifier))
             }
-            ModelType::Embedding(pool) => pool,
+            ModelType::Embedding(pool) => (pool, None),
         };
 
         // The Qwen3-Reranker models contain the `model` key
@@ -434,6 +476,7 @@ impl Qwen3Model {
             rotary_cache,
             rotary_dim,
             pool,
+            classifier,
             pad_token_id: config.eos_token_id as u32,
             device: vb.device().clone(),
             num_attention_heads: config.num_attention_heads,
@@ -676,5 +719,17 @@ impl Model for Qwen3Model {
 
     fn embed(&self, batch: Batch) -> Result<(Option<Tensor>, Option<Tensor>)> {
         self.forward(batch)
+    }
+
+    fn predict(&self, batch: Batch) -> Result<Tensor> {
+        match &self.classifier {
+            None => candle::bail!("`predict` is not implemented for this model"),
+            Some(classifier) => {
+                let (pooled_embeddings, _raw_embeddings) = self.forward(batch)?;
+                let pooled_embeddings =
+                    pooled_embeddings.expect("pooled_embeddings is empty. This is a bug.");
+                classifier.forward(&pooled_embeddings)
+            }
+        }
     }
 }
