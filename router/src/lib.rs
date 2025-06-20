@@ -54,6 +54,7 @@ pub async fn run(
     auto_truncate: bool,
     default_prompt: Option<String>,
     default_prompt_name: Option<String>,
+    rerank_template: Option<String>,
     hf_token: Option<String>,
     hostname: Option<String>,
     port: u16,
@@ -162,6 +163,12 @@ pub async fn run(
             }
         };
     }
+    
+    // Qwen3 reranker format when default prompt is provided
+    if config.model_type == "qwen3" && (default_prompt.is_some() || default_prompt_name.is_some()) {
+        // Let the existing tokenization handle prompt application
+        // The dual input validation will be removed to allow prompt use
+    }
 
     // Position IDs offset. Used for Roberta and camembert.
     let position_offset = if &config.model_type == "xlm-roberta"
@@ -226,6 +233,7 @@ pub async fn run(
         position_offset,
         default_prompt,
         prompts,
+        rerank_template,
     );
 
     // Get dtype

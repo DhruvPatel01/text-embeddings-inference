@@ -106,6 +106,13 @@ struct Args {
     #[clap(long, env, conflicts_with = "default_prompt_name")]
     default_prompt: Option<String>,
 
+    /// Custom template for reranking dual inputs (query, document pairs).
+    /// Use {query} and {document} as placeholders in your template.
+    /// Example: "Query: {query}\nDocument: {document}\nRelevant:"
+    /// When set, overrides default dual input behavior for reranking.
+    #[clap(long, env)]
+    rerank_template: Option<String>,
+
     /// [DEPRECATED IN FAVOR OF `--hf-token`] Your Hugging Face Hub token
     #[clap(long, env, hide = true)]
     #[redact(partial)]
@@ -222,6 +229,7 @@ async fn main() -> Result<()> {
         args.auto_truncate,
         args.default_prompt,
         args.default_prompt_name,
+        args.rerank_template,
         token,
         Some(args.hostname),
         args.port,

@@ -34,6 +34,7 @@ impl Tokenization {
         position_offset: usize,
         default_prompt: Option<String>,
         prompts: Option<HashMap<String, String>>,
+        rerank_template: Option<String>,
     ) -> Self {
         tracing::info!("Starting {workers} tokenization workers");
 
@@ -46,6 +47,7 @@ impl Tokenization {
             let receiver_clone = receiver.clone();
             let default_prompt_clone = default_prompt.clone();
             let prompts_clone = prompts.clone();
+            let rerank_template_clone = rerank_template.clone();
             // Spawn worker
             std::thread::spawn(move || {
                 tokenizer_worker(
@@ -54,6 +56,7 @@ impl Tokenization {
                     position_offset,
                     default_prompt_clone,
                     prompts_clone,
+                    rerank_template_clone,
                     receiver_clone,
                 )
             });
@@ -172,6 +175,7 @@ fn tokenizer_worker(
     position_offset: usize,
     default_prompt: Option<String>,
     prompts: Option<HashMap<String, String>>,
+    rerank_template: Option<String>,
     receiver: async_channel::Receiver<TokenizerRequest>,
 ) {
     // Loop over requests
@@ -187,8 +191,14 @@ fn tokenizer_worker(
             ) => {
                 parent_span.in_scope(|| {
                     if !response_tx.is_closed() {
-                        let default_prompt_clone = match prompt_name {
-                            None => default_prompt.clone(),
+                        let effective_prompt = match prompt_name {
+                            None => {
+                                // For dual inputs, use rerank_template if available, otherwise default_prompt
+                                match &inputs {
+                                    EncodingInput::Dual(_, _) => rerank_template.clone(),
+                                    _ => default_prompt.clone(),
+                                }
+                            },
                             Some(_) => None,
                         };
 
@@ -200,7 +210,7 @@ fn tokenizer_worker(
                             truncation_direction,
                             max_input_length,
                             position_offset,
-                            default_prompt_clone,
+                            effective_prompt,
                             prompt_name,
                             prompts.as_ref(),
                             &mut tokenizer,
@@ -323,18 +333,25 @@ fn tokenize_input(
             (Some(s), encoding)
         }
         EncodingInput::Dual(s1, s2) => {
-            if pre_prompt.is_some() {
-                return Err(TextEmbeddingsError::Validation(
-                    "`prompt_name` cannot be set with dual inputs".to_string(),
-                ));
-            }
-
-            (
-                None,
-                tokenizer
+            if let Some(template) = pre_prompt {
+                // Apply custom rerank template with {query} and {document} placeholders
+                let formatted_input = template
+                    .replace("{query}", &s1)
+                    .replace("{document}", &s2);
+                
+                let encoding = tokenizer
                     .with_truncation(truncate_params)?
-                    .encode::<(String, String)>((s1, s2), add_special_tokens)?,
-            )
+                    .encode::<&str>(&formatted_input, add_special_tokens)?;
+                
+                (Some(formatted_input), encoding)
+            } else {
+                (
+                    None,
+                    tokenizer
+                        .with_truncation(truncate_params)?
+                        .encode::<(String, String)>((s1, s2), add_special_tokens)?,
+                )
+            }
         }
         // input is encoded -> convert to tokenizers Encoding
         EncodingInput::Ids(ids) => {

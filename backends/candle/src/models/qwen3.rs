@@ -396,8 +396,7 @@ impl Qwen3ClassificationHead {
         let output_weight = vb
             .pp("score")
             .get((n_classes, config.hidden_size), "weight")?;
-        let output_bias = vb.pp("score").get(n_classes, "bias")?;
-        let output = Linear::new(output_weight, Some(output_bias), None);
+        let output = Linear::new(output_weight, None, None);
 
         Ok(Self {
             output,
